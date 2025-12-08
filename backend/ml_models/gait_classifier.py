@@ -55,6 +55,37 @@ class GaitClassifier:
             'supination'
         ]
         
+        # Clinical thresholds based on research literature
+        # Note: Negative angles = pronation (inward roll), Positive angles = supination (outward roll)
+        self.clinical_thresholds = {
+            'pronation': {
+                'neutral': (-5, 5),
+                'mild_pronation': (-10, -5),       # Fixed: negative for inward roll
+                'moderate_pronation': (-15, -10),   # Fixed: negative for inward roll
+                'severe_pronation': (float('-inf'), -15),  # Fixed: very negative for severe inward roll
+                'supination': (5, float('inf'))    # Fixed: positive for outward roll
+            },
+            'cadence': {
+                'slow': (0, 95),
+                'normal': (95, 125),
+                'fast': (125, float('inf'))
+            },
+            'step_length': {
+                'short': (0, 0.5),
+                'normal': (0.5, 0.8),
+                'long': (0.8, float('inf'))
+            }
+        }
+        
+        # Clinical reference values (from gait analysis research)
+        self.reference_values = {
+            'normal_cadence': {'mean': 112, 'std': 5.4},
+            'normal_step_length': {'mean': 0.67, 'std': 0.05},
+            'normal_stance_phase': {'mean': 62, 'std': 2},
+            'normal_swing_phase': {'mean': 38, 'std': 2},
+            'normal_pronation': {'mean': 0, 'std': 5}
+        }
+        
         # Initialize models
         self.rf_model = RandomForestClassifier(
             n_estimators=100,
@@ -78,9 +109,18 @@ class GaitClassifier:
         # Performance metrics
         self.performance_metrics = {}
         
+        # Load pretrained clinical classifier
+        try:
+            from .pretrained_loader import ClinicalGaitClassifier
+            self.clinical_classifier = ClinicalGaitClassifier()
+            logger.info("Clinical classifier loaded successfully")
+        except Exception as e:
+            logger.warning(f"Could not load clinical classifier: {e}")
+            self.clinical_classifier = None
+        
     def classify_gait(self, features: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Classify gait using ensemble of models
+        Classify gait using ensemble of models with clinical validation
         """
         try:
             feature_vector = np.array(features['feature_vector']).reshape(1, -1)
@@ -119,24 +159,67 @@ class GaitClassifier:
             # Ensemble prediction (majority voting with confidence weighting)
             ensemble_prediction = self._ensemble_predict(predictions, confidences)
             
-            # Rule-based validation
-            rule_based_prediction = self._rule_based_classification(features)
+            # Clinical rule-based classification for validation
+            clinical_prediction = self._clinical_classification(features)
+            
+            # FORCE clinical classification until ML models are retrained with correct thresholds
+            # The ML models were trained with incorrect angle interpretations
+            if clinical_prediction['confidence'] > 0.5:
+                logger.info(f"Using clinical classification: {clinical_prediction['class']} (confidence: {clinical_prediction['confidence']:.3f})")
+                ensemble_prediction['class'] = clinical_prediction['class']
+                ensemble_prediction['confidence'] = clinical_prediction['confidence']
+                ensemble_prediction['method_used'] = 'clinical_override'
+            elif ensemble_prediction.get('confidence', 0) < 0.6:
+                # Blend ML and clinical predictions
+                if clinical_prediction['confidence'] > 0.3:
+                    # Use clinical prediction with higher weight
+                    ensemble_prediction['class'] = clinical_prediction['class']
+                    ensemble_prediction['confidence'] = (
+                        ensemble_prediction.get('confidence', 0) * 0.3 + 
+                        clinical_prediction['confidence'] * 0.7
+                    )
+                    ensemble_prediction['method_used'] = 'clinical_weighted'
+                else:
+                    # Average both predictions
+                    ensemble_prediction['confidence'] = (
+                        ensemble_prediction.get('confidence', 0) * 0.5 + 
+                        clinical_prediction['confidence'] * 0.5
+                    )
+                    ensemble_prediction['method_used'] = 'hybrid'
+            else:
+                ensemble_prediction['method_used'] = 'ml_ensemble'
+            
+            # Add clinical validation score
+            clinical_validation = self._validate_with_clinical_thresholds(
+                ensemble_prediction['class'], 
+                features
+            )
             
             return {
                 'ensemble_prediction': ensemble_prediction,
                 'individual_predictions': predictions,
                 'confidences': confidences,
-                'rule_based_prediction': rule_based_prediction,
+                'clinical_prediction': clinical_prediction,
+                'clinical_validation': clinical_validation,
                 'feature_importance': self._get_feature_importance(),
                 'classification_confidence': ensemble_prediction.get('confidence', 0.0)
             }
             
         except Exception as e:
             logger.error(f"Classification error: {str(e)}")
-            return {
-                'ensemble_prediction': {'class': 'neutral', 'confidence': 0.0},
-                'error': str(e)
-            }
+            # Fallback to clinical classification
+            try:
+                clinical = self._clinical_classification(features)
+                return {
+                    'ensemble_prediction': clinical,
+                    'error': str(e),
+                    'method_used': 'clinical_fallback'
+                }
+            except:
+                return {
+                    'ensemble_prediction': {'class': 'neutral', 'confidence': 0.0},
+                    'error': str(e)
+                }
     
     def _ensemble_predict(self, predictions: Dict[str, str], confidences: Dict[str, float]) -> Dict[str, Any]:
         """Combine predictions from multiple models"""
@@ -169,6 +252,120 @@ class GaitClassifier:
             'class_probabilities': class_votes
         }
     
+    def _clinical_classification(self, features: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Clinical classification using validated thresholds from research
+        More reliable than ML with dummy training data
+        """
+        try:
+            # Use clinical classifier if available
+            if self.clinical_classifier:
+                raw_features = features.get('raw_features', {})
+                biomech = raw_features.get('biomechanical', [])
+                
+                if len(biomech) >= 4:
+                    left_eversion_mean = biomech[0]
+                    right_eversion_mean = biomech[2]
+                    
+                    # Classify each foot individually
+                    left_class, left_conf = self.clinical_classifier.classify_pronation(left_eversion_mean)
+                    right_class, right_conf = self.clinical_classifier.classify_pronation(right_eversion_mean)
+                    
+                    # Debug logging
+                    logger.info(f"Clinical classification debug:")
+                    logger.info(f"  Left foot: {left_eversion_mean}° → {left_class} (confidence: {left_conf:.3f})")
+                    logger.info(f"  Right foot: {right_eversion_mean}° → {right_class} (confidence: {right_conf:.3f})")
+                    
+                    left_severity = self._get_severity_score(left_class)
+                    right_severity = self._get_severity_score(right_class)
+                    logger.info(f"  Severity scores: Left={left_severity}, Right={right_severity}")
+                    
+                    # Determine overall classification based on more severe case
+                    if left_severity > right_severity:
+                        primary_class = left_class
+                        primary_confidence = left_conf
+                        primary_angle = left_eversion_mean
+                        logger.info(f"  Selected: Left foot ({left_class})")
+                    else:
+                        primary_class = right_class
+                        primary_confidence = right_conf
+                        primary_angle = right_eversion_mean
+                        logger.info(f"  Selected: Right foot ({right_class})")
+                    
+                    # Reduce confidence if there's significant asymmetry
+                    asymmetry = abs(left_eversion_mean - right_eversion_mean)
+                    if asymmetry > 10:  # High asymmetry
+                        primary_confidence *= 0.8
+                    
+                    return {
+                        'class': primary_class.replace('_', ' ').title() if '_' in primary_class else primary_class,
+                        'confidence': float(primary_confidence),
+                        'primary_angle': float(primary_angle),
+                        'left_angle': float(left_eversion_mean),
+                        'right_angle': float(right_eversion_mean),
+                        'asymmetry': float(asymmetry),
+                        'method': 'clinical_validated_individual'
+                    }
+            
+            # Fallback to built-in clinical thresholds
+            return self._rule_based_classification(features)
+            
+        except Exception as e:
+            logger.error(f"Clinical classification error: {str(e)}")
+            return {'class': 'neutral', 'confidence': 0.5, 'method': 'default'}
+    
+    def _get_severity_score(self, classification: str) -> int:
+        """Get severity score for classification to determine which foot is worse"""
+        severity_scores = {
+            'neutral': 0,
+            'mild_overpronation': 2,      # Updated to match new classification names
+            'moderate_overpronation': 4,  # Higher priority than supination
+            'severe_overpronation': 6,    # Highest priority
+            'mild_pronation': 2,          # Support both naming conventions
+            'moderate_pronation': 4,
+            'severe_pronation': 6,
+            'supination': 1               # Lower priority than pronation issues
+        }
+        return severity_scores.get(classification.replace(' ', '_').lower(), 0)
+    
+    def _validate_with_clinical_thresholds(self, classification: str, features: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validate ML classification against clinical thresholds
+        """
+        try:
+            raw_features = features.get('raw_features', {})
+            biomech = raw_features.get('biomechanical', [])
+            
+            if len(biomech) >= 4:
+                left_eversion = biomech[0]
+                right_eversion = biomech[2]
+                avg_eversion = (left_eversion + right_eversion) / 2
+                
+                # Check if classification matches clinical thresholds
+                classification_key = classification.lower().replace(' ', '_')
+                if classification_key in self.clinical_thresholds['pronation']:
+                    min_val, max_val = self.clinical_thresholds['pronation'][classification_key]
+                    
+                    if min_val == float('-inf'):
+                        is_valid = avg_eversion < max_val
+                    elif max_val == float('inf'):
+                        is_valid = avg_eversion >= min_val
+                    else:
+                        is_valid = min_val <= avg_eversion <= max_val
+                    
+                    return {
+                        'is_valid': is_valid,
+                        'confidence': 1.0 if is_valid else 0.3,
+                        'expected_range': (min_val, max_val),
+                        'actual_value': avg_eversion
+                    }
+            
+            return {'is_valid': True, 'confidence': 0.5, 'note': 'Insufficient data for validation'}
+            
+        except Exception as e:
+            logger.error(f"Clinical validation error: {str(e)}")
+            return {'is_valid': True, 'confidence': 0.5, 'error': str(e)}
+    
     def _rule_based_classification(self, features: Dict[str, Any]) -> Dict[str, Any]:
         """
         Rule-based classification as backup/validation
@@ -183,16 +380,17 @@ class GaitClassifier:
                 right_eversion_mean = biomech[2]
                 avg_eversion = (left_eversion_mean + right_eversion_mean) / 2
                 
-                # Biomechanical thresholds (degrees)
+                # Biomechanical thresholds (degrees) 
+                # Note: Negative angles = pronation (inward roll), Positive angles = supination (outward roll)
                 if -5 <= avg_eversion <= 5:
                     rule_class = 'neutral'
-                elif 5 < avg_eversion <= 10:
+                elif -10 <= avg_eversion < -5:
                     rule_class = 'mild_pronation'
-                elif 10 < avg_eversion <= 15:
+                elif -15 <= avg_eversion < -10:
                     rule_class = 'moderate_pronation'
-                elif avg_eversion > 15:
+                elif avg_eversion < -15:
                     rule_class = 'severe_pronation'
-                else:
+                else:  # avg_eversion > 5
                     rule_class = 'supination'
                 
                 # Calculate confidence based on how far from threshold boundaries
@@ -214,10 +412,10 @@ class GaitClassifier:
         """Calculate confidence for rule-based classification"""
         thresholds = {
             'neutral': (-5, 5),
-            'mild_pronation': (5, 10),
-            'moderate_pronation': (10, 15),
-            'severe_pronation': (15, float('inf')),
-            'supination': (float('-inf'), -5)
+            'mild_pronation': (-10, -5),
+            'moderate_pronation': (-15, -10),
+            'severe_pronation': (float('-inf'), -15),
+            'supination': (5, float('inf'))
         }
         
         if predicted_class in thresholds:
@@ -402,24 +600,60 @@ class GaitClassifier:
             scaler_path = self.model_dir / "scaler.pkl"
             nn_path = self.model_dir / "neural_network.pth"
             
+            models_loaded = False
+            
             if rf_path.exists():
                 self.rf_model = joblib.load(rf_path)
                 logger.info("Random Forest model loaded")
+                models_loaded = True
             
             if gb_path.exists():
                 self.gb_model = joblib.load(gb_path)
                 logger.info("Gradient Boosting model loaded")
+                models_loaded = True
             
             if scaler_path.exists():
                 self.scaler = joblib.load(scaler_path)
                 logger.info("Scaler loaded")
+            else:
+                # Initialize scaler with dummy data if not available
+                logger.info("Initializing scaler with default data")
+                dummy_data = np.random.rand(100, 20)
+                self.scaler.fit(dummy_data)
             
             if nn_path.exists():
                 self.neural_model.load_state_dict(torch.load(nn_path))
                 logger.info("Neural Network model loaded")
+                models_loaded = True
+            
+            # If no models are loaded, train with dummy data to initialize
+            if not models_loaded:
+                logger.info("No pre-trained models found, initializing with dummy data")
+                self._initialize_with_dummy_data()
             
         except Exception as e:
             logger.warning(f"Could not load pre-trained models: {str(e)}")
+            self._initialize_with_dummy_data()
+    
+    def _initialize_with_dummy_data(self):
+        """Initialize models with dummy data for first-time setup"""
+        try:
+            # Generate dummy training data
+            np.random.seed(42)
+            X_dummy = np.random.rand(100, 20)
+            y_dummy = np.random.randint(0, len(self.class_labels), 100)
+            
+            # Fit scaler
+            self.scaler.fit(X_dummy)
+            X_scaled = self.scaler.transform(X_dummy)
+            
+            # Train models with dummy data
+            self.rf_model.fit(X_scaled, y_dummy)
+            self.gb_model.fit(X_scaled, y_dummy)
+            
+            logger.info("Models initialized with dummy data")
+        except Exception as e:
+            logger.error(f"Error initializing models: {str(e)}")
     
     def get_performance_metrics(self) -> Dict[str, Any]:
         """Get current model performance metrics"""

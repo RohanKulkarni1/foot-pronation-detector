@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Box,
@@ -24,20 +24,18 @@ import {
   ListItemText
 } from '@mui/material';
 import {
-  VideoCamera,
+  Videocam,
   Upload,
   Analytics,
   CameraAlt,
   CheckCircle,
-  Warning,
-  Info,
   RotateLeft,
   RotateRight,
   Visibility
 } from '@mui/icons-material';
-import { useDropzone } from 'react-dropzone';
-import Webcam from 'react-webcam';
 import axios from 'axios';
+import config from '../config';
+import CameraRecorder from '../components/CameraRecorder';
 
 const MultiAngleCapture = () => {
   const navigate = useNavigate();
@@ -48,17 +46,8 @@ const MultiAngleCapture = () => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [showInstructions, setShowInstructions] = useState(false);
   const [selectedAngle, setSelectedAngle] = useState('rear');
-  const [recordingStates, setRecordingStates] = useState({
-    rear: false,
-    side: false,
-    front: false
-  });
-
-  const webcamRefs = {
-    rear: useRef(null),
-    side: useRef(null),
-    front: useRef(null)
-  };
+  const [showCameraRecorder, setShowCameraRecorder] = useState(false);
+  const [recordingAngle, setRecordingAngle] = useState('rear');
 
   const steps = ['Setup', 'Record/Upload', 'Process', 'Analyze'];
 
@@ -72,7 +61,9 @@ const MultiAngleCapture = () => {
         'Position camera directly behind subject',
         'Ensure both feet and lower legs are visible',
         'Subject should walk away from camera',
-        'Capture 10-15 steps for best results'
+        'Walk 20-30 feet (6-9 meters) at normal pace',
+        'Record 10-15 seconds for 8-10 complete gait cycles',
+        'Include 2-3 steps before/after for acceleration/deceleration'
       ]
     },
     {
@@ -84,7 +75,9 @@ const MultiAngleCapture = () => {
         'Position camera perpendicular to walking path',
         'Capture full body profile if possible',
         'Ensure clear view of knee and ankle movement',
-        'Record complete gait cycles'
+        'Walk 20-30 feet (6-9 meters) at normal pace',
+        'Record 10-15 seconds for 8-10 complete gait cycles',
+        'Maintain consistent walking speed throughout'
       ]
     },
     {
@@ -96,88 +89,103 @@ const MultiAngleCapture = () => {
         'Position camera directly in front of subject',
         'Focus on feet and lower leg alignment',
         'Subject should walk toward camera',
-        'Capture symmetrical foot placement'
+        'Walk 20-30 feet (6-9 meters) at normal pace',
+        'Record 10-15 seconds for 8-10 complete gait cycles',
+        'Capture symmetrical foot placement and stride width'
       ]
     }
   ];
 
-  const onDrop = useCallback(async (acceptedFiles) => {
+  const handleAngleFileUpload = async (event, angle) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
     setIsUploading(true);
     try {
       const formData = new FormData();
-      acceptedFiles.forEach(file => {
-        // Try to detect angle from filename or let user specify
-        formData.append('files', file);
-      });
+      formData.append('files', file);
+      formData.append('angle', angle); // Specify the angle
       
       if (sessionId) {
         formData.append('session_id', sessionId);
       }
 
-      const response = await axios.post('/upload', formData, {
+      const response = await axios.post(config.getApiUrl('/upload'), formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
 
       setSessionId(response.data.session_id);
-      setUploadedFiles(prev => [...prev, ...response.data.uploaded_files]);
+      
+      // Update uploaded files with angle information
+      const newFiles = response.data.uploaded_files.map(uploadedFile => ({
+        ...uploadedFile,
+        angle: angle
+      }));
+      
+      setUploadedFiles(prev => {
+        // Remove any existing file for this angle
+        const filtered = prev.filter(f => f.angle !== angle);
+        return [...filtered, ...newFiles];
+      });
+      
       setActiveStep(2);
     } catch (error) {
       console.error('Upload error:', error);
     } finally {
       setIsUploading(false);
     }
-  }, [sessionId]);
-
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    accept: {
-      'video/*': ['.mp4', '.mov', '.avi', '.webm']
-    },
-    multiple: true
-  });
-
-  const startRecording = (angle) => {
-    setRecordingStates(prev => ({
-      ...prev,
-      [angle]: true
-    }));
-    
-    // In a real implementation, you would start MediaRecorder here
-    // For demo purposes, we'll simulate recording
-    setTimeout(() => {
-      stopRecording(angle);
-    }, 5000);
   };
 
-  const stopRecording = (angle) => {
-    setRecordingStates(prev => ({
-      ...prev,
-      [angle]: false
-    }));
-    
-    // Simulate adding recorded file
-    const newFile = {
-      filename: `${angle}_view_recording.webm`,
-      angle: angle,
-      timestamp: new Date().toISOString()
-    };
-    
-    setUploadedFiles(prev => [...prev, newFile]);
+  const handleRecordingComplete = async (file, angle) => {
+    setIsUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('files', file);
+      
+      if (sessionId) {
+        formData.append('session_id', sessionId);
+      }
+
+      const response = await axios.post(config.getApiUrl('/upload'), formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+
+      setSessionId(response.data.session_id);
+      setUploadedFiles(prev => [...prev, ...response.data.uploaded_files]);
+      setActiveStep(2);
+      setShowCameraRecorder(false);
+    } catch (error) {
+      console.error('Upload error:', error);
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const openCameraRecorder = (angle) => {
+    setRecordingAngle(angle);
+    setShowCameraRecorder(true);
   };
 
   const analyzeGait = async () => {
-    if (!sessionId || uploadedFiles.length === 0) return;
+    if (!sessionId || uploadedFiles.length === 0) {
+      console.error('No session ID or files uploaded');
+      alert('Please upload at least one video before analyzing');
+      return;
+    }
 
     setIsAnalyzing(true);
     setActiveStep(3);
     
     try {
-      const response = await axios.post(`/analyze/${sessionId}`);
+      console.log('Starting analysis for session:', sessionId);
+      const response = await axios.post(config.getApiUrl(`/analyze/${sessionId}`));
+      console.log('Analysis complete:', response.data);
+      
       // Navigate to results page with analysis data
       navigate(`/analysis/${sessionId}`);
     } catch (error) {
       console.error('Analysis error:', error);
-    } finally {
+      alert(`Analysis failed: ${error.response?.data?.detail || error.message}`);
       setIsAnalyzing(false);
     }
   };
@@ -259,38 +267,75 @@ const MultiAngleCapture = () => {
 
       {/* Upload/Record Section */}
       <Grid container spacing={3} sx={{ mb: 3 }}>
-        {/* File Upload */}
+        {/* File Upload by Angle */}
         <Grid item xs={12} md={6}>
           <Card>
             <CardContent>
               <Typography variant="h6" gutterBottom>
-                Upload Video Files
+                Upload Videos by Angle
               </Typography>
-              <Paper
-                {...getRootProps()}
-                sx={{
-                  p: 3,
-                  textAlign: 'center',
-                  border: '2px dashed',
-                  borderColor: isDragActive ? 'primary.main' : 'grey.300',
-                  backgroundColor: isDragActive ? 'primary.light' : 'grey.50',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s'
-                }}
-              >
-                <input {...getInputProps()} />
-                <Upload sx={{ fontSize: 48, color: 'primary.main', mb: 2 }} />
-                <Typography variant="h6" gutterBottom>
-                  {isDragActive ? 'Drop videos here' : 'Drag & drop videos'}
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                Upload one video for each camera angle below
+              </Typography>
+              
+              {cameraAngles.map((angle) => (
+                <Box key={angle.key} sx={{ mb: 2 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
+                    {angle.icon}
+                    <Typography variant="subtitle1" sx={{ ml: 1, fontWeight: 500 }}>
+                      {angle.label}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" sx={{ ml: 2 }}>
+                      - {angle.description}
+                    </Typography>
+                  </Box>
+                  
+                  <input
+                    type="file"
+                    accept="video/*"
+                    id={`file-${angle.key}`}
+                    style={{ display: 'none' }}
+                    onChange={(e) => handleAngleFileUpload(e, angle.key)}
+                  />
+                  
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                    <Button
+                      variant="outlined"
+                      component="label"
+                      htmlFor={`file-${angle.key}`}
+                      startIcon={<Upload />}
+                      disabled={isUploading}
+                      size="small"
+                    >
+                      Choose {angle.label} Video
+                    </Button>
+                    
+                    {uploadedFiles.find(f => f.angle === angle.key) && (
+                      <Chip
+                        label="✓ Uploaded"
+                        color="success"
+                        size="small"
+                        variant="outlined"
+                      />
+                    )}
+                  </Box>
+                </Box>
+              ))}
+              
+              {isUploading && (
+                <Box sx={{ mt: 2 }}>
+                  <LinearProgress />
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                    Uploading video...
+                  </Typography>
+                </Box>
+              )}
+              
+              <Alert severity="info" sx={{ mt: 2 }}>
+                <Typography variant="body2">
+                  <strong>Tip:</strong> You can upload 1, 2, or all 3 angles. More angles = better analysis accuracy.
                 </Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Support: MP4, MOV, AVI, WebM
-                </Typography>
-                <Button variant="contained" sx={{ mt: 2 }}>
-                  Choose Files
-                </Button>
-              </Paper>
-              {isUploading && <LinearProgress sx={{ mt: 2 }} />}
+              </Alert>
             </CardContent>
           </Card>
         </Grid>
@@ -320,27 +365,45 @@ const MultiAngleCapture = () => {
                   ))}
                 </Box>
 
-                {/* Camera Preview (simplified) */}
-                <Paper sx={{ p: 2, backgroundColor: 'grey.100', mb: 2 }}>
-                  <CameraAlt sx={{ fontSize: 64, color: 'grey.400' }} />
-                  <Typography variant="body2" color="text.secondary">
-                    Camera Preview - {cameraAngles.find(a => a.key === selectedAngle)?.label}
-                  </Typography>
-                </Paper>
-
-                {/* Recording Controls */}
-                <Button
-                  variant={recordingStates[selectedAngle] ? "contained" : "outlined"}
-                  color={recordingStates[selectedAngle] ? "error" : "primary"}
-                  onClick={() => recordingStates[selectedAngle] ? 
-                    stopRecording(selectedAngle) : 
-                    startRecording(selectedAngle)
-                  }
-                  startIcon={<VideoCamera />}
-                  disabled={isUploading}
-                >
-                  {recordingStates[selectedAngle] ? 'Stop Recording' : 'Start Recording'}
-                </Button>
+                {/* Camera Recorder or Preview */}
+                {showCameraRecorder ? (
+                  <Box>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
+                      <Typography variant="subtitle1">
+                        Recording {cameraAngles.find(a => a.key === recordingAngle)?.label}
+                      </Typography>
+                      <Button 
+                        size="small" 
+                        onClick={() => setShowCameraRecorder(false)}
+                        color="secondary"
+                      >
+                        Close Camera
+                      </Button>
+                    </Box>
+                    <CameraRecorder 
+                      angle={recordingAngle}
+                      onRecordingComplete={handleRecordingComplete}
+                    />
+                  </Box>
+                ) : (
+                  <>
+                    <Paper sx={{ p: 2, backgroundColor: 'grey.100', mb: 2 }}>
+                      <CameraAlt sx={{ fontSize: 64, color: 'grey.400' }} />
+                      <Typography variant="body2" color="text.secondary">
+                        Select angle and click to start recording
+                      </Typography>
+                    </Paper>
+                    <Button
+                      variant="contained"
+                      color="primary"
+                      onClick={() => openCameraRecorder(selectedAngle)}
+                      startIcon={<Videocam />}
+                      disabled={isUploading}
+                    >
+                      Open Camera for {cameraAngles.find(a => a.key === selectedAngle)?.label}
+                    </Button>
+                  </>
+                )}
               </Box>
             </CardContent>
           </Card>
@@ -358,7 +421,7 @@ const MultiAngleCapture = () => {
               {uploadedFiles.map((file, index) => (
                 <Grid item xs={12} sm={6} md={4} key={index}>
                   <Paper sx={{ p: 2, display: 'flex', alignItems: 'center' }}>
-                    <VideoCamera sx={{ mr: 2, color: 'primary.main' }} />
+                    <Videocam sx={{ mr: 2, color: 'primary.main' }} />
                     <Box sx={{ flexGrow: 1 }}>
                       <Typography variant="body2" noWrap>
                         {file.filename}
