@@ -355,6 +355,12 @@ class EnhancedGaitAnalyzer:
         
         combined['combined_metrics'] = all_metrics
         
+        # Generate biomechanical profile
+        combined['biomechanical_profile'] = self._generate_biomechanical_profile(all_metrics)
+        
+        # Generate biomechanical metrics for frontend compatibility
+        combined['biomechanical_metrics'] = self._generate_biomechanical_metrics(all_metrics)
+        
         return combined
     
     def _calculate_enhanced_metrics(self, combined_results: Dict[str, Any]) -> Dict[str, Any]:
@@ -381,21 +387,20 @@ class EnhancedGaitAnalyzer:
     
     def _assess_pronation(self, left_eversion: float, right_eversion: float) -> Dict[str, Any]:
         """Enhanced pronation assessment"""
-        # Thresholds based on biomechanical literature (would be ML-trained in practice)
-        neutral_range = (-5, 5)  # degrees
-        mild_pronation_range = (5, 10)
-        moderate_pronation_range = (10, 15)
+        # Corrected thresholds based on biomechanical literature
+        # NEGATIVE angles = pronation (foot rolling inward)
+        # POSITIVE angles = supination (foot rolling outward)
         
         def classify_foot(eversion):
-            if neutral_range[0] <= eversion <= neutral_range[1]:
+            if -5 <= eversion <= 5:
                 return "neutral"
-            elif mild_pronation_range[0] <= eversion <= mild_pronation_range[1]:
+            elif -10 <= eversion < -5:
                 return "mild_pronation"
-            elif moderate_pronation_range[0] <= eversion <= moderate_pronation_range[1]:
+            elif -15 <= eversion < -10:
                 return "moderate_pronation"
-            elif eversion > moderate_pronation_range[1]:
+            elif eversion < -15:
                 return "severe_pronation"
-            else:
+            else:  # eversion > 5
                 return "supination"
         
         return {
@@ -413,6 +418,192 @@ class EnhancedGaitAnalyzer:
             'step_regularity': 1 / (1 + step_analysis.get('step_length_variability', 1)),
             'overall_efficiency': 0.8  # Would be calculated based on multiple factors
         }
+    
+    def _generate_biomechanical_profile(self, all_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate comprehensive biomechanical profile from all metrics"""
+        profile = {
+            'foot_mechanics': {},
+            'gait_pattern': {},
+            'asymmetry_analysis': {},
+            'risk_factors': []
+        }
+        
+        # Extract foot mechanics from rear view
+        if 'rear' in all_metrics:
+            rear_metrics = all_metrics['rear']
+            if 'left_rearfoot_eversion' in rear_metrics and 'right_rearfoot_eversion' in rear_metrics:
+                left_eversion = rear_metrics['left_rearfoot_eversion']['mean']
+                right_eversion = rear_metrics['right_rearfoot_eversion']['mean']
+                
+                # Foot mechanics analysis
+                profile['foot_mechanics'] = {
+                    'left_foot': {
+                        'eversion_angle': round(left_eversion, 2),
+                        'classification': self._classify_single_foot(left_eversion),
+                        'severity': self._get_severity_level(left_eversion)
+                    },
+                    'right_foot': {
+                        'eversion_angle': round(right_eversion, 2),
+                        'classification': self._classify_single_foot(right_eversion),
+                        'severity': self._get_severity_level(right_eversion)
+                    }
+                }
+                
+                # Asymmetry analysis
+                asymmetry = abs(left_eversion - right_eversion)
+                profile['asymmetry_analysis'] = {
+                    'degree_difference': round(asymmetry, 2),
+                    'level': 'High' if asymmetry > 10 else 'Moderate' if asymmetry > 5 else 'Low',
+                    'clinical_significance': asymmetry > 5
+                }
+                
+                # Risk factors based on biomechanics
+                if left_eversion < -15 or right_eversion < -15:
+                    profile['risk_factors'].append('Severe overpronation detected')
+                if asymmetry > 10:
+                    profile['risk_factors'].append('Significant gait asymmetry')
+                if left_eversion > 5 or right_eversion > 5:
+                    profile['risk_factors'].append('Supination pattern detected')
+        
+        # Extract gait pattern from side view
+        if 'side' in all_metrics:
+            side_metrics = all_metrics['side']
+            if 'step_analysis' in side_metrics:
+                step_data = side_metrics['step_analysis']
+                profile['gait_pattern'] = {
+                    'cadence': step_data.get('cadence', 0),
+                    'step_length': step_data.get('avg_step_length', 0),
+                    'step_variability': step_data.get('step_length_variability', 0),
+                    'pattern_quality': 'Regular' if step_data.get('step_length_variability', 1) < 0.1 else 'Irregular'
+                }
+                
+                # Add cadence-related risk factors
+                if step_data.get('cadence', 0) < 90:
+                    profile['risk_factors'].append('Below normal cadence')
+                elif step_data.get('cadence', 0) > 140:
+                    profile['risk_factors'].append('Above normal cadence')
+        
+        # Overall assessment
+        profile['overall_assessment'] = self._generate_overall_assessment(profile)
+        
+        return profile
+    
+    def _classify_single_foot(self, eversion: float) -> str:
+        """Classify single foot based on eversion angle"""
+        if -5 <= eversion <= 5:
+            return "Neutral"
+        elif -10 <= eversion < -5:
+            return "Mild Overpronation"
+        elif -15 <= eversion < -10:
+            return "Moderate Overpronation"
+        elif eversion < -15:
+            return "Severe Overpronation"
+        else:
+            return "Supination"
+    
+    def _get_severity_level(self, eversion: float) -> str:
+        """Get severity level based on eversion angle"""
+        abs_eversion = abs(eversion)
+        if abs_eversion <= 5:
+            return "Normal"
+        elif abs_eversion <= 10:
+            return "Mild"
+        elif abs_eversion <= 15:
+            return "Moderate"
+        else:
+            return "Severe"
+    
+    def _generate_overall_assessment(self, profile: Dict[str, Any]) -> str:
+        """Generate overall assessment based on profile"""
+        risk_count = len(profile.get('risk_factors', []))
+        
+        if risk_count == 0:
+            return "Normal gait pattern with no significant concerns"
+        elif risk_count == 1:
+            return "Minor gait irregularities detected - monitor over time"
+        elif risk_count == 2:
+            return "Moderate gait abnormalities - consider professional evaluation"
+        else:
+            return "Significant gait abnormalities - professional evaluation recommended"
+    
+    def _generate_biomechanical_metrics(self, all_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate biomechanical metrics in format expected by frontend"""
+        metrics = {
+            'cadence': 110,  # Default values
+            'step_length': 0.65,
+            'stance_time': 0.62,
+            'swing_time': 0.38,
+            'cadence_score': 85,
+            'step_length_score': 80,
+            'symmetry_score': 75,
+            'efficiency_score': 80,
+            'stability_score': 85,
+            'balance_score': 80
+        }
+        
+        # Extract actual values from metrics
+        if 'side' in all_metrics:
+            side_metrics = all_metrics['side']
+            if 'step_analysis' in side_metrics:
+                step_data = side_metrics['step_analysis']
+                metrics['cadence'] = step_data.get('cadence', 110)
+                metrics['step_length'] = step_data.get('avg_step_length', 0.65)
+                
+                # Calculate scores (0-100 scale)
+                # Cadence score (optimal: 100-120 steps/min)
+                cadence = metrics['cadence']
+                if 100 <= cadence <= 120:
+                    metrics['cadence_score'] = 90 + (10 * (1 - abs(cadence - 110) / 10))
+                else:
+                    metrics['cadence_score'] = max(50, 90 - abs(cadence - 110))
+                
+                # Step length score (optimal: 0.6-0.8m)
+                step_len = metrics['step_length']
+                if 0.6 <= step_len <= 0.8:
+                    metrics['step_length_score'] = 90
+                else:
+                    metrics['step_length_score'] = max(50, 90 - abs(step_len - 0.7) * 100)
+        
+        # Calculate symmetry score from rear metrics
+        if 'rear' in all_metrics:
+            rear_metrics = all_metrics['rear']
+            if 'left_rearfoot_eversion' in rear_metrics and 'right_rearfoot_eversion' in rear_metrics:
+                left_eversion = rear_metrics['left_rearfoot_eversion']['mean']
+                right_eversion = rear_metrics['right_rearfoot_eversion']['mean']
+                asymmetry = abs(left_eversion - right_eversion)
+                
+                # Symmetry score (lower asymmetry = higher score)
+                if asymmetry <= 2:
+                    metrics['symmetry_score'] = 95
+                elif asymmetry <= 5:
+                    metrics['symmetry_score'] = 85
+                elif asymmetry <= 10:
+                    metrics['symmetry_score'] = 70
+                else:
+                    metrics['symmetry_score'] = max(50, 70 - asymmetry)
+                
+                # Stability score based on pronation severity
+                max_eversion = max(abs(left_eversion), abs(right_eversion))
+                if max_eversion <= 5:
+                    metrics['stability_score'] = 95
+                elif max_eversion <= 10:
+                    metrics['stability_score'] = 80
+                elif max_eversion <= 15:
+                    metrics['stability_score'] = 65
+                else:
+                    metrics['stability_score'] = 50
+                
+                # Balance score (combination of symmetry and stability)
+                metrics['balance_score'] = (metrics['symmetry_score'] + metrics['stability_score']) / 2
+        
+        # Efficiency score (combination of cadence and step length)
+        metrics['efficiency_score'] = (metrics['cadence_score'] + metrics['step_length_score']) / 2
+        
+        # Stance and swing time (typical values if not directly measured)
+        metrics['stance_time'] = 0.62  # 62% of gait cycle
+        metrics['swing_time'] = 0.38   # 38% of gait cycle
+        
+        return metrics
     
     def _extract_ml_features(self, combined_results: Dict[str, Any]) -> Dict[str, List[float]]:
         """Extract features for ML classification"""

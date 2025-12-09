@@ -40,12 +40,28 @@ RESULTS_DIR = Path("results")
 UPLOAD_DIR.mkdir(exist_ok=True)
 RESULTS_DIR.mkdir(exist_ok=True)
 
-# Mount static files
-app.mount("/results", StaticFiles(directory=str(RESULTS_DIR)), name="results")
+# Mount static files (changed path to avoid conflict with API endpoint)
+app.mount("/static-results", StaticFiles(directory=str(RESULTS_DIR)), name="static_results")
 
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "version": "2.0.0", "phase": "2"}
+
+@app.get("/debug-results/{session_id}")
+async def debug_results(session_id: str):
+    """Debug version of get_results"""
+    results_file = RESULTS_DIR / f"{session_id}_results.json"
+    
+    return {
+        "session_id": session_id,
+        "looking_for": str(results_file),
+        "absolute_path": str(results_file.absolute()),
+        "current_dir": os.getcwd(),
+        "results_dir": str(RESULTS_DIR),
+        "results_dir_exists": RESULTS_DIR.exists(),
+        "file_exists": results_file.exists(),
+        "files_in_results": [f.name for f in RESULTS_DIR.glob("*") if f.is_file()][:10]
+    }
 
 @app.post("/upload")
 async def upload_videos(
@@ -61,8 +77,11 @@ async def upload_videos(
     session_dir.mkdir(exist_ok=True)
     
     for file in files:
-        if not file.content_type.startswith("video/"):
-            raise HTTPException(status_code=400, detail=f"File {file.filename} is not a video")
+        # More flexible video type checking
+        valid_extensions = ('.mp4', '.mov', '.avi', '.MP4', '.MOV', '.AVI')
+        if not (file.content_type.startswith("video/") or 
+                file.filename.lower().endswith(valid_extensions)):
+            raise HTTPException(status_code=400, detail=f"File {file.filename} is not a video. Type: {file.content_type}")
         
         file_path = session_dir / f"{file.filename}"
         with open(file_path, "wb") as f:
@@ -87,10 +106,16 @@ async def analyze_gait(session_id: str):
     if not session_dir.exists():
         raise HTTPException(status_code=404, detail="Session not found")
     
-    # Get all video files in session
-    video_files = list(session_dir.glob("*.mp4")) + list(session_dir.glob("*.mov"))
+    # Get all video files in session (case-insensitive)
+    video_files = []
+    for pattern in ["*.mp4", "*.MP4", "*.mov", "*.MOV", "*.avi", "*.AVI"]:
+        video_files.extend(session_dir.glob(pattern))
+    
     if not video_files:
-        raise HTTPException(status_code=404, detail="No video files found")
+        # Log what files exist for debugging
+        all_files = list(session_dir.glob("*"))
+        file_list = [f.name for f in all_files]
+        raise HTTPException(status_code=404, detail=f"No video files found. Files in session: {file_list}")
     
     try:
         # Enhanced analysis with ML classification
@@ -98,7 +123,27 @@ async def analyze_gait(session_id: str):
         
         # ML Classification
         ml_classification = classifier.classify_gait(results['features'])
-        results['ml_classification'] = ml_classification
+        
+        # Extract the proper classification data from the response
+        if 'ensemble_prediction' in ml_classification:
+            # Full classification response with clinical data
+            results['ml_classification'] = {
+                'primary_classification': ml_classification['ensemble_prediction'].get('class', 'neutral'),
+                'confidence': ml_classification['ensemble_prediction'].get('confidence', 0.0),
+                'model_used': ml_classification.get('method_used', 'clinical_fallback'),
+                'confidence_scores': ml_classification['ensemble_prediction'].get('class_probabilities', {}),
+                'clinical_prediction': ml_classification.get('clinical_prediction', {}),
+                'clinical_validation': ml_classification.get('clinical_validation', {}),
+                'individual_predictions': ml_classification.get('individual_predictions', {}),
+                'feature_importance': ml_classification.get('feature_importance', {})
+            }
+            
+            # Also add clinical classification as separate field for backward compatibility
+            if ml_classification.get('clinical_prediction'):
+                results['clinical_classification'] = ml_classification['clinical_prediction']
+        else:
+            # Simplified response (fallback mode)
+            results['ml_classification'] = ml_classification
         
         # Save results
         results_file = RESULTS_DIR / f"{session_id}_results.json"
