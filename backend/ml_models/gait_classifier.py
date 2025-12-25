@@ -207,18 +207,23 @@ class GaitClassifier:
             
         except Exception as e:
             logger.error(f"Classification error: {str(e)}")
-            # Fallback to clinical classification
+            logger.error(f"Error details: {repr(e)}")
+            # Fallback to clinical classification but preserve confidence scores
             try:
                 clinical = self._clinical_classification(features)
                 return {
                     'ensemble_prediction': clinical,
-                    'error': str(e),
-                    'method_used': 'clinical_fallback'
+                    'clinical_prediction': clinical,
+                    'confidence_scores': {clinical.get('class', 'neutral').lower().replace(' ', '_'): clinical.get('confidence', 0.5)},
+                    'method_used': 'clinical_fallback',
+                    'error': str(e)
                 }
-            except:
+            except Exception as fallback_error:
+                logger.error(f"Clinical fallback also failed: {str(fallback_error)}")
                 return {
                     'ensemble_prediction': {'class': 'neutral', 'confidence': 0.0},
-                    'error': str(e)
+                    'confidence_scores': {'neutral': 0.5},
+                    'error': f"ML Error: {str(e)}, Clinical Error: {str(fallback_error)}"
                 }
     
     def _ensemble_predict(self, predictions: Dict[str, str], confidences: Dict[str, float]) -> Dict[str, Any]:
@@ -258,9 +263,17 @@ class GaitClassifier:
         More reliable than ML with dummy training data
         """
         try:
-            # Use clinical classifier if available
+            # Check if we have front view data (foot progression angles)
+            raw_features = features.get('raw_features', {})
+            
+            # Front view classification based on foot progression angles
+            if 'spatial' in raw_features and len(raw_features['spatial']) > 0:
+                spatial = raw_features['spatial']
+                if len(spatial) >= 2:  # Has foot progression data
+                    return self._classify_front_view(spatial)
+            
+            # Use clinical classifier for rear view if available
             if self.clinical_classifier:
-                raw_features = features.get('raw_features', {})
                 biomech = raw_features.get('biomechanical', [])
                 
                 if len(biomech) >= 4:
@@ -327,6 +340,54 @@ class GaitClassifier:
             'supination': 1               # Lower priority than pronation issues
         }
         return severity_scores.get(classification.replace(' ', '_').lower(), 0)
+    
+    def _classify_front_view(self, spatial_features: List[float]) -> Dict[str, Any]:
+        """Classify gait based on front view foot progression angles"""
+        try:
+            # Spatial features from front view: [avg_step_length, step_length_variability, ...]
+            # For front view, we focus on step symmetry and progression patterns
+            
+            if len(spatial_features) >= 2:
+                step_length = spatial_features[0]
+                step_variability = spatial_features[1] if len(spatial_features) > 1 else 0
+                
+                # Classification based on step patterns and symmetry
+                if step_variability > 0.15:  # High variability suggests irregularity
+                    classification = "irregular_gait"
+                    confidence = min(0.8, step_variability * 2)
+                elif step_length < 0.3:  # Very short steps
+                    classification = "short_step_pattern"
+                    confidence = 0.7
+                elif step_length > 1.2:  # Very long steps
+                    classification = "long_step_pattern" 
+                    confidence = 0.7
+                else:
+                    classification = "normal_gait"
+                    confidence = 0.8
+                
+                return {
+                    'class': classification,
+                    'confidence': float(confidence),
+                    'step_length': float(step_length),
+                    'step_variability': float(step_variability),
+                    'method': 'front_view_clinical'
+                }
+            
+            # Default if insufficient data
+            return {
+                'class': 'normal_gait',
+                'confidence': 0.6,
+                'method': 'front_view_default'
+            }
+            
+        except Exception as e:
+            logger.error(f"Front view classification error: {str(e)}")
+            return {
+                'class': 'normal_gait',
+                'confidence': 0.5,
+                'method': 'front_view_fallback',
+                'error': str(e)
+            }
     
     def _validate_with_clinical_thresholds(self, classification: str, features: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -409,7 +470,7 @@ class GaitClassifier:
             return {'class': 'neutral', 'confidence': 0.0}
     
     def _calculate_rule_confidence(self, angle: float, predicted_class: str) -> float:
-        """Calculate confidence for rule-based classification"""
+        """Calculate confidence for rule-based classification with stability zones"""
         thresholds = {
             'neutral': (-5, 5),
             'mild_pronation': (-10, -5),
@@ -429,6 +490,14 @@ class GaitClassifier:
             else:
                 center = (min_thresh + max_thresh) / 2
                 distance = (max_thresh - min_thresh) / 2 - abs(angle - center)
+            
+            # Add stability for borderline cases
+            # If angle is within 2 degrees of boundary, reduce confidence
+            if predicted_class != 'neutral':
+                if min_thresh != float('-inf') and abs(angle - min_thresh) < 2:
+                    distance *= 0.7  # Reduce confidence near boundaries
+                if max_thresh != float('inf') and abs(angle - max_thresh) < 2:
+                    distance *= 0.7  # Reduce confidence near boundaries
             
             # Convert to confidence (0.5-1.0 range)
             confidence = 0.5 + min(distance / 10, 0.5)

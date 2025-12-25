@@ -93,14 +93,24 @@ const AdvancedAnalysis = () => {
   }, [sessionId]);
 
   const fetchResults = async () => {
+    console.log('🚀 FETCHING RESULTS FOR SESSION:', sessionId);
     try {
       setLoading(true);
-      const url = config.getApiUrl(`/results/${sessionId}`);
-      const response = await axios.get(url);
+      const url = config.getApiUrl(`/results/${sessionId}?_t=${Date.now()}`);
+      console.log('🔗 FETCH URL:', url);
+      const response = await axios.get(url, {
+        headers: {
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache'
+        }
+      });
+      console.log('✅ Raw response data:', response.data);
+      console.log('🤖 ML Classification:', response.data.ml_classification);
+      console.log('📊 Confidence Scores:', response.data.ml_classification?.confidence_scores);
       setResults(response.data);
       
-      // Check if visualizations exist
-      await checkExistingVisualizations();
+      // Check if visualizations exist - temporarily disabled since endpoint doesn't exist
+      // await checkExistingVisualizations();
     } catch (err) {
       setError('Failed to load analysis results. Please try again.');
       console.error('Error fetching results:', err);
@@ -225,10 +235,10 @@ const AdvancedAnalysis = () => {
     labels: ['Left Foot', 'Right Foot'],
     datasets: [
       {
-        label: 'Contact Time (s)',
+        label: 'Eversion Angle (°)',
         data: [
-          results.asymmetry_metrics?.left_foot_contact_time || 0,
-          results.asymmetry_metrics?.right_foot_contact_time || 0
+          Math.abs(results.biomechanical_profile?.foot_mechanics?.left_foot?.eversion_angle || 0),
+          Math.abs(results.biomechanical_profile?.foot_mechanics?.right_foot?.eversion_angle || 0)
         ],
         backgroundColor: ['rgba(54, 162, 235, 0.5)', 'rgba(255, 99, 132, 0.5)'],
         borderColor: ['rgb(54, 162, 235)', 'rgb(255, 99, 132)'],
@@ -277,7 +287,9 @@ const AdvancedAnalysis = () => {
   };
 
   const mlConfidenceData = {
-    labels: Object.keys(results.ml_classification?.confidence_scores || {}),
+    labels: Object.keys(results.ml_classification?.confidence_scores || {}).map(label => 
+      label.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
+    ),
     datasets: [
       {
         data: Object.values(results.ml_classification?.confidence_scores || {}),
@@ -288,7 +300,14 @@ const AdvancedAnalysis = () => {
           'rgba(255, 99, 132, 0.8)',
           'rgba(153, 102, 255, 0.8)'
         ],
-        borderWidth: 0
+        borderColor: [
+          'rgba(75, 192, 192, 1)',
+          'rgba(54, 162, 235, 1)',
+          'rgba(255, 206, 86, 1)',
+          'rgba(255, 99, 132, 1)',
+          'rgba(153, 102, 255, 1)'
+        ],
+        borderWidth: 2
       }
     ]
   };
@@ -303,9 +322,6 @@ const AdvancedAnalysis = () => {
         <Box sx={{ flexGrow: 1 }}>
           <Typography variant="h4" gutterBottom>
             Gait Analysis Results
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Session ID: {sessionId || 'Latest Analysis'}
           </Typography>
         </Box>
         <Box sx={{ display: 'flex', gap: 2 }}>
@@ -356,9 +372,6 @@ const AdvancedAnalysis = () => {
             <Grid item xs={12} md={6}>
               <Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.9)', mb: 1 }}>
                 Model Used: {results.ml_classification?.model_used || 'Ensemble'}
-              </Typography>
-              <Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.9)' }}>
-                Analysis Time: {new Date(results.timestamp || Date.now()).toLocaleString()}
               </Typography>
             </Grid>
           </Grid>
@@ -429,7 +442,7 @@ const AdvancedAnalysis = () => {
                   />
                 </Box>
                 <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-                  Asymmetry Index: {results.asymmetry_metrics?.asymmetry_index?.toFixed(2) || 'N/A'}%
+                  Asymmetry Difference: {results.biomechanical_profile?.asymmetry_analysis?.degree_difference?.toFixed(2) || 'N/A'}° ({results.biomechanical_profile?.asymmetry_analysis?.level || 'Unknown'} level)
                 </Typography>
               </CardContent>
             </Card>
@@ -499,20 +512,56 @@ const AdvancedAnalysis = () => {
                 <Typography variant="h6" gutterBottom>
                   Classification Confidence Scores
                 </Typography>
-                <Box sx={{ height: 300 }}>
-                  <Doughnut 
-                    data={mlConfidenceData}
-                    options={{
-                      responsive: true,
-                      maintainAspectRatio: false,
-                      plugins: {
-                        legend: {
-                          position: 'bottom'
-                        }
+                
+
+                {Object.keys(results.ml_classification?.confidence_scores || {}).length > 0 ? (
+                  <>
+                    <Box sx={{ height: 300 }}>
+                      <Doughnut 
+                        data={mlConfidenceData}
+                        options={{
+                          responsive: true,
+                          maintainAspectRatio: false,
+                          plugins: {
+                            legend: {
+                              position: 'bottom'
+                            },
+                            tooltip: {
+                              callbacks: {
+                                label: function(context) {
+                                  const label = context.label || '';
+                                  const value = (context.parsed * 100).toFixed(1);
+                                  return `${label}: ${value}%`;
+                                }
+                              }
+                            }
+                          }
+                        }}
+                      />
+                    </Box>
+                    
+                    {/* Alternative display if chart fails */}
+                    <Box sx={{ mt: 2 }}>
+                      <Typography variant="subtitle2" gutterBottom>
+                        Confidence Breakdown:
+                      </Typography>
+                      {Object.entries(results.ml_classification?.confidence_scores || {}).map(([key, value]) => (
+                        <Typography key={key} variant="body2">
+                          {key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}: {(value * 100).toFixed(1)}%
+                        </Typography>
+                      ))}
+                    </Box>
+                  </>
+                ) : (
+                  <Box sx={{ height: 300, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <Typography variant="body2" color="text.secondary" align="center">
+                      {results.ml_classification ? 
+                        'No confidence score breakdown available for this analysis' : 
+                        'No ML classification data available'
                       }
-                    }}
-                  />
-                </Box>
+                    </Typography>
+                  </Box>
+                )}
               </CardContent>
             </Card>
           </Grid>
@@ -573,36 +622,100 @@ const AdvancedAnalysis = () => {
                   <Grid item xs={6} md={3}>
                     <Paper sx={{ p: 2, textAlign: 'center' }}>
                       <Typography variant="h5" color="success.main">
-                        92%
+                        {((results.ml_classification?.confidence || 0) * 100).toFixed(1)}%
                       </Typography>
-                      <Typography variant="body2">Accuracy</Typography>
+                      <Typography variant="body2">Confidence</Typography>
                     </Paper>
                   </Grid>
                   <Grid item xs={6} md={3}>
                     <Paper sx={{ p: 2, textAlign: 'center' }}>
                       <Typography variant="h5" color="info.main">
-                        0.91
+                        {results.ml_classification?.model_used || 'Clinical'}
                       </Typography>
-                      <Typography variant="body2">Precision</Typography>
+                      <Typography variant="body2">Method</Typography>
                     </Paper>
                   </Grid>
                   <Grid item xs={6} md={3}>
                     <Paper sx={{ p: 2, textAlign: 'center' }}>
                       <Typography variant="h5" color="warning.main">
-                        0.93
+                        {Object.keys(results.ml_classification?.confidence_scores || {}).length || 0}
                       </Typography>
-                      <Typography variant="body2">Recall</Typography>
+                      <Typography variant="body2">Classes</Typography>
                     </Paper>
                   </Grid>
                   <Grid item xs={6} md={3}>
                     <Paper sx={{ p: 2, textAlign: 'center' }}>
                       <Typography variant="h5" color="secondary.main">
-                        0.92
+                        {results.ml_classification?.clinical_validation?.is_valid ? 'Valid' : 'N/A'}
                       </Typography>
-                      <Typography variant="body2">F1-Score</Typography>
+                      <Typography variant="body2">Clinical Valid</Typography>
                     </Paper>
                   </Grid>
                 </Grid>
+                
+                {/* Show confidence breakdown if available */}
+                {results.ml_classification?.confidence_scores && (
+                  <Box sx={{ mt: 3 }}>
+                    <Typography variant="subtitle1" gutterBottom>
+                      Classification Confidence Breakdown
+                    </Typography>
+                    <Grid container spacing={2}>
+                      {Object.entries(results.ml_classification.confidence_scores).map(([className, confidence]) => (
+                        <Grid item xs={6} md={4} key={className}>
+                          <Paper sx={{ p: 2 }}>
+                            <Typography variant="body2" color="text.secondary">
+                              {className.replace('_', ' ').toUpperCase()}
+                            </Typography>
+                            <Typography variant="h6" color="primary.main">
+                              {(confidence * 100).toFixed(1)}%
+                            </Typography>
+                          </Paper>
+                        </Grid>
+                      ))}
+                    </Grid>
+                  </Box>
+                )}
+                
+                {/* Show clinical validation details if available */}
+                {results.ml_classification?.clinical_prediction && (
+                  <Box sx={{ mt: 3 }}>
+                    <Typography variant="subtitle1" gutterBottom>
+                      Clinical Assessment
+                    </Typography>
+                    <Grid container spacing={2}>
+                      <Grid item xs={6} md={4}>
+                        <Paper sx={{ p: 2 }}>
+                          <Typography variant="body2" color="text.secondary">
+                            Clinical Classification
+                          </Typography>
+                          <Typography variant="h6" color="primary.main">
+                            {results.ml_classification.clinical_prediction.class || 'N/A'}
+                          </Typography>
+                        </Paper>
+                      </Grid>
+                      <Grid item xs={6} md={4}>
+                        <Paper sx={{ p: 2 }}>
+                          <Typography variant="body2" color="text.secondary">
+                            Clinical Confidence
+                          </Typography>
+                          <Typography variant="h6" color="primary.main">
+                            {((results.ml_classification.clinical_prediction.confidence || 0) * 100).toFixed(1)}%
+                          </Typography>
+                        </Paper>
+                      </Grid>
+                      <Grid item xs={6} md={4}>
+                        <Paper sx={{ p: 2 }}>
+                          <Typography variant="body2" color="text.secondary">
+                            Method Used
+                          </Typography>
+                          <Typography variant="h6" color="primary.main">
+                            {results.ml_classification.clinical_prediction.method || 'N/A'}
+                          </Typography>
+                        </Paper>
+                      </Grid>
+                    </Grid>
+                  </Box>
+                )}
               </CardContent>
             </Card>
           </Grid>
@@ -799,7 +912,7 @@ const AdvancedAnalysis = () => {
                     {(() => {
                       const classification = results.ml_classification?.primary_classification || '';
                       const confidence = results.ml_classification?.confidence || 0;
-                      const asymmetryIndex = results.asymmetry_metrics?.asymmetry_index || 0;
+                      const asymmetryIndex = results.biomechanical_profile?.asymmetry_analysis?.degree_difference || 0;
                       const efficiencyScore = results.biomechanical_metrics?.efficiency_score || 80;
                       const symmetryScore = results.biomechanical_metrics?.symmetry_score || 85;
 
@@ -909,9 +1022,6 @@ const AdvancedAnalysis = () => {
                 </Typography>
                 <Divider sx={{ my: 2 }} />
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <Typography variant="caption" color="text.secondary">
-                    Analysis performed: {new Date(results.timestamp || Date.now()).toLocaleString()}
-                  </Typography>
                   <Button 
                     variant="contained" 
                     onClick={() => navigate('/multi-angle')}
